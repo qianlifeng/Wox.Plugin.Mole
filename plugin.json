@@ -1,20 +1,18 @@
 {
-    "Id": "replaceme_with_id",
+    "Id": "36fa2371-144c-4f53-98bb-874f77b21849",
     "TriggerKeywords": [
-        "replaceme_with_keyword"
+        "mo"
     ],
-    "Name": "replaceme_with_name",
-    "Description": "replaceme_with_description",
-    "Author": "",
+    "Name": "Mole",
+    "Description": "Dig deep like a mole to optimize you Mac",
+    "Author": "qianlifeng",
     "Version": "0.0.1",
     "MinWoxVersion": "2.0.0",
     "Runtime": "python",
-    "Website": "replaceme_with_website",
-    "Entry": "replaceme_with_projectname/main.py",
+    "Website": "https://github.com/qianlifeng/Wox.Plugin.Mole",
+    "Entry": "mole/main.py",
     "Icon": "relative:image/app.png",
     "SupportedOS": [
-        "windows",
-        "linux",
         "darwin"
     ]
 }

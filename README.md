@@ -1,17 +1,5 @@
-# Wox.Plugin.replaceme_with_projectname
+# Wox.Plugin.Mole
 
-# How to use this template
+> Dig deep like a mole to optimize you Mac.
 
-- clone this repository
-- search all text `replaceme_with_` and replace with your value
-
-# Build
-`make build`
-
-# Build wox file which is ready for distribute
-`make publish`
-
-# Recommand extensions for vscode
-- ms-python.python
-- charliermarsh.ruff
-- ms-python.mypy-type-checker
+Wox plugin for https://github.com/tw93/Mole

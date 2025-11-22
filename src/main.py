@@ -1,5 +1,3 @@
-import datetime
-
 from wox_plugin import (
     ActionContext,
     Context,
@@ -7,7 +5,6 @@ from wox_plugin import (
     PluginInitParams,
     PublicAPI,
     Query,
-    RefreshableResult,
     Result,
     ResultAction,
     WoxImage,
@@ -20,10 +17,6 @@ class MyPlugin(Plugin):
 
     async def init(self, ctx: Context, init_params: PluginInitParams) -> None:
         self.api = init_params.api
-
-    def on_refresh(self, r: RefreshableResult) -> RefreshableResult:
-        r.sub_title = f"Refresh at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        return r
 
     async def action(self, actionContext: ActionContext):
         await self.api.log(Context.new(), "info", actionContext.context_data)
@@ -47,8 +40,6 @@ class MyPlugin(Plugin):
                         action=self.action,
                     )
                 ],
-                refresh_interval=1000,
-                on_refresh=self.on_refresh,
             )
         )
 
