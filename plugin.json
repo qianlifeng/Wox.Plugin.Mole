@@ -14,5 +14,49 @@
     "Icon": "relative:image/app.png",
     "SupportedOS": [
         "darwin"
-    ]
+    ],
+    "I18n": {
+        "en_US": {
+            "title_clean": "Clean with Mole",
+            "subtitle_clean": "Clean up system junk files to free disk space.",
+            "title_not_installed": "Mole is not installed",
+            "subtitle_not_installed": "Install with `brew install mole` and try again.",
+            "title_not_found": "Mole not found",
+            "subtitle_not_found": "Install mole (brew install mole) before running cleanup.",
+            "title_running": "Cleaning...",
+            "subtitle_starting": "Starting cleanup...",
+            "subtitle_cmd_not_found": "`mole` command was not found on PATH.",
+            "title_completed": "Cleanup completed",
+            "title_failed": "Cleanup failed",
+            "subtitle_done": "Done! Freed {0} of space.",
+            "subtitle_finished": "Cleanup finished.",
+            "subtitle_failed": "Cleanup failed.",
+            "subtitle_stopped": "Stopped current cleanup.",
+            "subtitle_nothing_to_stop": "Nothing running to stop.",
+            "action_run": "Run",
+            "action_preview": "Preview (dry run)",
+            "action_stop": "Stop"
+        },
+        "zh_CN": {
+            "title_clean": "使用 Mole 清理",
+            "subtitle_clean": "清理系统垃圾文件以释放磁盘空间。",
+            "title_not_installed": "Mole 未安装",
+            "subtitle_not_installed": "请使用 `brew install mole` 安装后重试。",
+            "title_not_found": "找不到 Mole",
+            "subtitle_not_found": "请先安装 mole (brew install mole)。",
+            "title_running": "正在清理...",
+            "subtitle_starting": "正在启动清理...",
+            "subtitle_cmd_not_found": "找不到 `mole` 命令。",
+            "title_completed": "清理完成",
+            "title_failed": "清理失败",
+            "subtitle_done": "完成！已释放 {0} 空间。",
+            "subtitle_finished": "清理完成。",
+            "subtitle_failed": "清理失败。",
+            "subtitle_stopped": "已停止清理。",
+            "subtitle_nothing_to_stop": "没有正在运行的清理任务。",
+            "action_run": "运行",
+            "action_preview": "预览 (模拟运行)",
+            "action_stop": "停止"
+        }
+    }
 }
