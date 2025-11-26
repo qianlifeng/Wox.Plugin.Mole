@@ -167,3 +167,5 @@ dist/
 wox.plugin.killprocess.wox
 .mypy_cache/
 .ruff_cache/
+
+*.wox
