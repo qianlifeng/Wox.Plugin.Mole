@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Dig deep like a mole to optimize you Mac"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["wox-plugin==0.0.56"]
+dependencies = [
+    "wox-plugin==0.0.73",
+]
 
 [project.optional-dependencies]
 dev = ["ruff", "mypy"]
