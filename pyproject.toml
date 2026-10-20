@@ -1,11 +1,11 @@
 [project]
 name = "mole"
 version = "0.1.0"
-description = "Dig deep like a mole to optimize you Mac"
+description = "Clean and analyze your Mac or Windows PC with Mole"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "wox-plugin==0.0.73",
+    "wox-plugin==0.0.89",
 ]
 
 [project.optional-dependencies]
