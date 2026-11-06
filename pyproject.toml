@@ -1,15 +1,15 @@
 [project]
 name = "mole"
 version = "0.1.0"
-description = "Clean and analyze your Mac or Windows PC with Mole"
+description = "Clean your Mac or Windows PC with a little Mole companion"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "wox-plugin==0.0.89",
+    "wox-plugin==0.0.97",
 ]
 
 [project.optional-dependencies]
-dev = ["ruff", "mypy"]
+dev = ["ruff", "mypy", "pillow"]
 
 [tool.ruff]
 line-length = 140

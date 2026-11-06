@@ -1,17 +1,13 @@
-"""Native Wox commands and an in-app Mole cleanup session."""
+"""A single, full-width Mole cleanup scene, opened directly with `mo `."""
 
 import asyncio
-import codecs
-import os
-import re
-import subprocess
-import sys
 import time
+from pathlib import Path
 
 from wox_plugin import (
     ActionContext,
-    ChangeQueryParam,
     Context,
+    CopyParams,
     Plugin,
     PluginInitParams,
     PublicAPI,
@@ -21,494 +17,192 @@ from wox_plugin import (
     QueryType,
     Result,
     ResultAction,
-    ResultTail,
-    ResultTailType,
-    RefreshQueryParam,
     UpdatableResult,
     WoxImage,
-    WoxPreview,
 )
-from .dashboard import LABELS, Session, render, script_update
-from .runtime import MoleRuntime
-from .commands import CommandSession
-from .uninstall import UninstallBackend
-
-COMMANDS = ("clean", "uninstall", "optimize", "analyze", "status")
-EXECUTE_ICON = WoxImage.new_svg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-    'stroke="var(--wox-theme-icon-color)" stroke-width="1.8" stroke-linejoin="round">'
-    '<path d="M13 2 4.5 13.5h5.5L9 22l10-13h-6z"/></svg>'
-)
+from .dashboard import LABELS, Session, summary
+from .runner import CleanupRunner
+from .scene import HouseScene
+from .views import render
 
 
-class MolePlugin(Plugin, MoleRuntime):
+class MolePlugin(Plugin, CleanupRunner):
     def __init__(self) -> None:
-        self.jobs: dict[str, CommandSession] = {}
-        self.status_lock = asyncio.Lock()
-        self.command_context: Context | None = None
-        self.command_search = ""
         self.api: PublicAPI | None = None
-        self.session = Session(dry_run=False)
+        self.session = Session()
+        self.scene = HouseScene()
         self.task: asyncio.Task | None = None
+        self.scene_task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
-        self.active_command = ""
         self.clean_context: Context | None = None
         self.labels = LABELS.copy()
-        self.colors: dict[str, str] = {}
+        self.assets = Path(__file__).resolve().parent.parent / "image"
+        self.active = False
         self.stop_requested = False
         self.unloading = False
-        self.uninstall_backend = UninstallBackend()
-        self.apps: list[dict] | None = None
-        self.apps_task: asyncio.Task | None = None
-        self.apps_error = ""
-        self.apps_pending = ""
-        self.apps_busy_name = ""
-        self.apps_search = ""
+        self.publish_lock = asyncio.Lock()
+        self._visibility_checked = 0.0
+        self._visible = True
+        self._published: tuple | None = None
+        self._published_actions: tuple | None = None
 
     async def init(self, ctx: Context, init_params: PluginInitParams) -> None:
         self.api = init_params.api
+        self.assets = Path(init_params.plugin_directory) / "image"
         await self.api.on_unload(ctx, self.on_unload)
         await self.api.on_leave_plugin_query(ctx, self.leave_query)
         for key in LABELS:
             value = await self.api.get_translation(ctx, "preview_" + key)
             if value and value not in ("preview_" + key, "i18n:preview_" + key):
                 self.labels[key] = value
+        # Explicit maintenance actions do not belong in MRU. The companion scene
+        # is launcher-only; it does not expose an unattended cleanup tool.
 
     async def leave_query(self, ctx: Context) -> None:
-        """Status is query-scoped; cleanup operations may continue in the background."""
-        await self.set_active_command("")
+        self.active = False
         self.clean_context = None
 
-    async def set_active_command(self, command: str) -> None:
-        async with self.status_lock:
-            self.active_command = command
-            job = self.jobs.get("status")
-            if command != "status" and job:
-                task = job.task
-                await job.stop()
-                if task:
-                    await task
-            elif command == "status" and not self.unloading:
-                await self.command_job("status").start()
-
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
-        self.command_context = ctx
-        await self.set_active_command(query.command.lower() if query.trigger_keyword == "mo" else "")
-        if query.trigger_keyword != "mo":
+        self.active = query.type == QueryType.INPUT and query.trigger_keyword == "mo"
+        if not self.active:
+            self.clean_context = None
             return QueryResponse(results=[])
-        command = query.command.lower()
-        if not command:
-            search = query.search.strip().casefold()
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="mole-command-" + name,
-                        title=f"i18n:title_{name}",
-                        sub_title=f"i18n:subtitle_{name}",
-                        icon=WoxImage.new_relative("image/app.png"),
-                        score=100 - index,
-                        actions=[
-                            ResultAction(
-                                name="i18n:action_enter",
-                                action=self.enter_command,
-                                is_default=True,
-                                prevent_hide_after_action=True,
-                                icon=EXECUTE_ICON,
-                                context_data={"command": name},
-                            )
-                        ],
-                    )
-                    for index, name in enumerate(COMMANDS)
-                    if search in name.casefold()
-                ]
-            )
-        if command not in COMMANDS:
-            return QueryResponse(results=[])
-        self.command_context = ctx
-        self.command_search = query.search.strip()
-        if command == "clean":
-            self.clean_context = ctx
-        if command == "uninstall":
-            return self.query_uninstall(ctx, query.search)
-        if self.api:
-            try:
-                theme = await self.api.get_theme_colors(ctx)
-                self.colors = {key: getattr(theme, key, "") for key in ("background", "text", "secondary_text", "border", "accent")}
-            except Exception:
-                pass  # Older hosts retain a readable default palette.
+        self.clean_context = ctx
+        self._published = None
+        self._published_actions = None
+        self._visible = True
+        self._visibility_checked = 0
         return QueryResponse(
             results=[
                 Result(
-                    id="mole-" + command,
-                    title=f"i18n:title_{command}",
+                    id="mole-clean",
+                    title="i18n:title_clean",
                     icon=WoxImage.new_relative("image/app.png"),
-                    preview=self.preview(command),
-                    actions=self.actions(command),
+                    preview=self.preview(),
+                    actions=self.actions(),
                 )
             ],
             layout=QueryLayout(result_preview_width_ratio=0),
         )
 
-    async def enter_command(self, ctx: Context, action_context: ActionContext) -> None:
-        command = action_context.context_data.get("command", "")
-        if self.api and command in COMMANDS:
-            await self.api.change_query(ctx, ChangeQueryParam(query_type=QueryType.INPUT, query_text=f"mo {command} "))
+    def preview(self):
+        self.scene.update(time.monotonic(), self.session.state)
+        if (
+            self.session.state in ("running", "completed")
+            and not self.scene.frozen
+            and self.active
+            and not self.unloading
+            and self.clean_context
+            and (self.scene_task is None or self.scene_task.done())
+        ):
+            self.scene_task = asyncio.create_task(self.animate_scene(self.clean_context, self.session))
+        return render(self.session, self.scene, self.labels, self.assets)
 
-    def preview(self, command: str) -> WoxPreview:
-        return render(command, self.session if command == "clean" else self.command_job(command).session, self.labels, self.colors)
+    async def animate_scene(self, ctx: Context, session: Session) -> None:
+        """Schedule only choreography boundaries; Wox owns every animation frame."""
+        try:
+            while self.session is session and self.active and not self.unloading and not self.scene.frozen:
+                delay = min(1.0, max(0.02, self.scene.deadline - time.monotonic())) if self._visible else 1.0
+                await asyncio.sleep(delay)
+                await self.publish(ctx)
+        finally:
+            if self.scene_task is asyncio.current_task():
+                self.scene_task = None
 
-    def actions(self, command: str) -> list[ResultAction]:
-        def action(key, callback, default=False, data=None, hotkey=""):
-            return ResultAction(
-                name="i18n:" + key,
-                action=callback,
-                is_default=default,
+    def actions(self) -> list[ResultAction]:
+        running = self.task is not None and not self.task.done()
+        name = "action_stop" if running else ("action_clean" if self.session.state == "ready" else "action_again")
+        actions = [
+            ResultAction(
+                name="i18n:" + name,
+                action=self.stop_clean if running else self.start_clean,
+                is_default=True,
                 prevent_hide_after_action=True,
-                icon=EXECUTE_ICON,
-                context_data=data or {},
-                hotkey=hotkey,
+                icon=WoxImage.new_relative("image/stop.svg" if running else "image/execute.svg"),
             )
-
-        actions = []
-        if command == "clean":
-            running = self.task is not None and not self.task.done()
-            if running:
-                actions.append(action("action_stop", self.stop_clean, True))
-            else:
-                actions.extend(
-                    [
-                        action("action_clean", self.start_clean, True, {"mode": "clean"}),
-                        action(
-                            "action_preview",
-                            self.start_clean,
-                            False,
-                            {"mode": "preview"},
-                            "cmd+enter" if sys.platform == "darwin" else "ctrl+enter",
-                        ),
-                    ]
+        ]
+        if self.session.state in ("failed", "stopped") and self.session.logs:
+            actions.append(
+                ResultAction(
+                    name="i18n:action_copy_output",
+                    action=self.copy_output,
+                    prevent_hide_after_action=True,
+                    icon=WoxImage.new_relative("image/copy.svg"),
                 )
-        if command in ("optimize", "analyze"):
-            job = self.command_job(command)
-            if job.task and not job.task.done():
-                actions.append(action("action_stop", self.stop_command, True, {"command": command}))
-            else:
-                actions.append(action("title_" + command, self.start_command, True, {"command": command, "path": self.command_search}))
-                if command == "optimize":
-                    actions.append(
-                        action(
-                            "action_preview",
-                            self.start_command,
-                            False,
-                            {"command": command, "mode": "preview"},
-                            "cmd+enter" if sys.platform == "darwin" else "ctrl+enter",
-                        )
-                    )
-        actions.append(action("action_back", self.go_home, command == "status"))
+            )
         return actions
 
-    def command_job(self, command: str) -> CommandSession:
-        if command not in self.jobs:
-
-            async def publish():
-                if self.api and self.active_command == command and not self.unloading and self.command_context:
-                    await self.api.update_result(
-                        self.command_context,
-                        UpdatableResult(
-                            id="mole-" + command,
-                            preview=script_update(self.jobs[command].session, self.labels, command),
-                            actions=self.actions(command),
-                        ),
-                    )
-
-            self.jobs[command] = CommandSession(command, publish)
-        return self.jobs[command]
-
-    async def start_command(self, ctx: Context, action_context: ActionContext) -> None:
-        command = action_context.context_data.get("command", "")
-        if command in ("optimize", "analyze", "status"):
-            await self.command_job(command).start(
-                action_context.context_data.get("mode") == "preview", action_context.context_data.get("path", "")
-            )
-
-    async def stop_command(self, ctx: Context, action_context: ActionContext) -> None:
-        command = action_context.context_data.get("command", "")
-        if command in self.jobs:
-            await self.jobs[command].stop()
-
-    def query_uninstall(self, ctx: Context, search: str) -> QueryResponse:
-        if search != self.apps_search:
-            self.apps_pending = ""
-            self.apps_search = search
-        if self.apps is None and self.apps_task is None and not self.apps_error:
-            self.apps_task = asyncio.create_task(self.load_apps(ctx))
-        icon = WoxImage.new_relative("image/app.png")
-
-        def action(key, callback, data=None, default=False):
-            return ResultAction(
-                name="i18n:" + key,
-                action=callback,
-                icon=EXECUTE_ICON,
-                prevent_hide_after_action=True,
-                is_default=default,
-                context_data=data or {},
-            )
-
-        back = action("action_back", self.go_home)
-        refresh = action("action_refresh_apps", self.refresh_apps)
-        if self.apps_task is not None:
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="mole-uninstall-busy",
-                        title="i18n:apps_uninstalling" if self.apps_busy_name else "i18n:apps_loading",
-                        sub_title=self.apps_busy_name,
-                        icon=icon,
-                        actions=[back],
-                    )
-                ]
-            )
-        pending = next((app for app in self.apps or [] if app["key"] == self.apps_pending), None)
-        if pending:
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="mole-uninstall-confirm",
-                        title=pending["name"],
-                        sub_title="i18n:apps_confirm",
-                        icon=icon,
-                        tails=[ResultTail(type=ResultTailType.TEXT, text=pending["size"])],
-                        actions=[
-                            action("action_confirm_uninstall", self.confirm_uninstall, {"key": pending["key"]}, True),
-                            action("action_cancel_uninstall", self.cancel_uninstall),
-                        ],
-                    )
-                ]
-            )
-        rows = []
-        if self.apps_error:
-            rows.append(
-                Result(
-                    id="mole-uninstall-error",
-                    title="i18n:apps_error",
-                    sub_title=self.apps_error,
-                    icon=icon,
-                    score=10000,
-                    actions=[refresh, back],
-                )
-            )
-        import hashlib
-
-        for index, app in enumerate(self.apps or []):
-            if search.strip().casefold() not in app["name"].casefold():
-                continue
-            actions = [refresh, back]
-            if app["key"].startswith(("registry:", "package:")):
-                actions.insert(0, action("action_uninstall_app", self.select_uninstall, {"key": app["key"]}, True))
-            rows.append(
-                Result(
-                    id="mole-app-" + hashlib.sha256(app["key"].encode()).hexdigest()[:24],
-                    title=app["name"],
-                    icon=icon,
-                    score=1000 - index,
-                    tails=[ResultTail(type=ResultTailType.TEXT, text=app["size"])],
-                    actions=actions,
-                )
-            )
-        if not rows:
-            rows.append(Result(title="i18n:apps_empty", icon=icon, actions=[refresh, back]))
-        return QueryResponse(results=rows)
-
-    async def refresh_apps_view(self, ctx: Context) -> None:
-        if self.api and self.active_command == "uninstall" and not self.unloading:
-            await self.api.refresh_query(ctx, RefreshQueryParam())
-
-    async def load_apps(self, ctx: Context, key: str = "", refresh: bool = False) -> None:
-        try:
-            self.apps = await self.uninstall_backend.run("uninstall" if key else "list", key, refresh)
-            self.apps_error = ""
-        except Exception as exc:
-            self.apps_error = str(exc)
-            # Never keep an actionable stale snapshot after an attempted uninstall.
-            if key:
-                self.apps = None
-        finally:
-            self.apps_pending = ""
-            self.apps_busy_name = ""
-            self.apps_task = None
-            await self.refresh_apps_view(ctx)
-
-    async def refresh_apps(self, ctx: Context, action_context: ActionContext) -> None:
-        if self.apps_task is not None:
-            return
-        self.apps_error = ""
-        self.apps_pending = ""
-        self.apps_task = asyncio.create_task(self.load_apps(ctx, refresh=True))
-        await self.refresh_apps_view(ctx)
-
-    async def select_uninstall(self, ctx: Context, action_context: ActionContext) -> None:
-        if self.apps_task is None and any(app["key"] == action_context.context_data.get("key") for app in self.apps or []):
-            self.apps_pending = action_context.context_data["key"]
-            await self.refresh_apps_view(ctx)
-
-    async def cancel_uninstall(self, ctx: Context, action_context: ActionContext) -> None:
-        self.apps_pending = ""
-        await self.refresh_apps_view(ctx)
-
-    async def confirm_uninstall(self, ctx: Context, action_context: ActionContext) -> None:
-        key = action_context.context_data.get("key", "")
-        if self.apps_task is not None or not key or key != self.apps_pending:
-            return
-        app = next((app for app in self.apps or [] if app["key"] == key), None)
-        if not app or not key.startswith(("registry:", "package:")):
-            return
-        self.apps_pending = ""
-        self.apps_busy_name = app["name"]
-        self.apps_task = asyncio.create_task(self.load_apps(ctx, key=key))
-        await self.refresh_apps_view(ctx)
+    async def copy_output(self, ctx: Context, action_context: ActionContext) -> None:
+        if self.api:
+            await self.api.copy(ctx, CopyParams(text="\n".join(self.session.logs)))
 
     async def publish(self, ctx: Context) -> None:
-        if self.api and self.active_command == "clean" and not self.unloading:
-            await self.api.update_result(
-                self.clean_context or ctx,
-                UpdatableResult(id="mole-clean", preview=script_update(self.session, self.labels), actions=self.actions("clean")),
+        """Serialize snapshots and scope them to the latest live query."""
+        if not self.api or not self.active or self.unloading or not self.clean_context:
+            return
+        async with self.publish_lock:
+            if not self.active or self.unloading or not self.clean_context:
+                return
+            query_context = self.clean_context
+            now = time.monotonic()
+            if now - self._visibility_checked >= 1:
+                self._visibility_checked = now
+                try:
+                    self._visible = await asyncio.wait_for(self.api.is_visible(query_context), 0.5)
+                except Exception:
+                    self._visible = True
+            if not self._visible or not self.active or self.unloading or self.clean_context is not query_context:
+                return
+            self.scene.update(now, self.session.state)
+            view = summary(self.session, self.labels, now)
+            signature = (
+                id(query_context),
+                self.session.started_at,
+                self.session.state,
+                view["title"],
+                view["amount"],
+                view["message"],
+                self.scene.motion_id,
+                self.scene.mode,
+                self.scene.facing,
+                self.scene.frozen,
+                self.task is not None,
             )
-
-    async def go_home(self, ctx: Context, action_context: ActionContext) -> None:
-        await self.set_active_command("")
-        self.apps_pending = ""
-        if self.api:
-            await self.api.change_query(ctx, ChangeQueryParam(query_type=QueryType.INPUT, query_text="mo "))
+            if signature == self._published:
+                return
+            action_state = (
+                id(query_context),
+                self.session.state,
+                self.task is not None,
+                bool(self.session.logs) if self.session.state in ("failed", "stopped") else False,
+            )
+            actions = self.actions() if action_state != self._published_actions else None
+            try:
+                await asyncio.wait_for(
+                    self.api.update_result(
+                        query_context,
+                        UpdatableResult(id="mole-clean", preview=self.preview(), actions=actions),
+                    ),
+                    2,
+                )
+                self._published = signature
+                self._published_actions = action_state
+            except Exception:
+                # UI transport failures must never fail or interrupt actual cleanup.
+                pass
 
     async def start_clean(self, ctx: Context, action_context: ActionContext) -> None:
-        if self.task and not self.task.done():
+        if self.unloading or self.task and not self.task.done():
             return
+        if self.scene_task:
+            self.scene_task.cancel()
+            self.scene_task = None
         self.stop_requested = False
-        self.session = Session(state="running", dry_run=action_context.context_data.get("mode") == "preview")
+        self.session = Session(state="running")
+        self.scene = HouseScene()
+        self.scene.start(time.monotonic())
         self.task = asyncio.create_task(self.run_clean(ctx))
         await self.publish(ctx)
-
-    def clean_command(self) -> list[str]:
-        executable = self._find_mo_executable()
-        if not executable:
-            raise OSError("Mole CLI was not found. Install Mole and restart Wox.")
-        args = [executable, "clean"] + (["--dry-run"] if self.session.dry_run else [])
-        if sys.platform == "win32":
-            # Prefer the script beside an actual launcher, for reliable UTF-8.
-            script = os.path.join(os.path.dirname(os.path.realpath(executable)), "mole.ps1")
-            if os.path.isfile(script):
-                args[0] = script
-            literal = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in args)
-            return [
-                self._powershell(),
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
-                + "try { "
-                + literal
-                + "; exit $LASTEXITCODE } catch { Write-Output $_; exit 1 }",
-            ]
-        return args
-
-    async def run_clean(self, ctx: Context) -> None:
-        async def heartbeat() -> None:
-            while True:
-                await asyncio.sleep(1)
-                try:
-                    await asyncio.wait_for(self.publish(ctx), 3)
-                except Exception:
-                    # A transient UI failure must not interrupt Mole.
-                    pass
-
-        ticker = asyncio.create_task(heartbeat())
-        try:
-            env = os.environ.copy()
-            env.update(NO_COLOR="1", MOLE_NO_COLOR="1", LC_ALL="C", LANG="C")
-            env["MOLE_DRY_RUN"] = "1" if self.session.dry_run else "0"
-            self.process = await asyncio.create_subprocess_exec(
-                *self.clean_command(),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                start_new_session=sys.platform != "win32",
-            )
-            if self.stop_requested:
-                await self.terminate()
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            buffer = ""
-            last_update = 0.0
-            assert self.process.stdout is not None
-            while chunk := await self.process.stdout.read(4096):
-                buffer += decoder.decode(chunk)
-                lines = re.split(r"[\r\n]+", buffer)
-                buffer = lines.pop()
-                for line in lines:
-                    self.session.feed(line)
-                if len(buffer) > 8000:
-                    self.session.feed(buffer[:8000])
-                    buffer = ""
-                    self.session.truncated = True
-                if time.monotonic() - last_update >= 0.25:
-                    await self.publish(ctx)
-                    last_update = time.monotonic()
-            self.session.feed(buffer + decoder.decode(b"", final=True))
-            code = await self.process.wait()
-            self.session.finish(code, self.stop_requested)
-        except asyncio.CancelledError:
-            self.session.state = "stopped"
-            await self.terminate()
-            raise
-        except Exception as exc:
-            self.session.state = "failed"
-            self.session.feed(str(exc))
-            if self.process and self.process.returncode is None:
-                await self.terminate()
-        finally:
-            ticker.cancel()
-            try:
-                await ticker
-            except asyncio.CancelledError:
-                pass
-            self.session.ended_at = time.monotonic()
-            self.process = None
-            self.task = None
-            await self.publish(ctx)
-
-    async def terminate(self) -> None:
-        process = self.process
-        if not process or process.returncode is not None:
-            return
-        if sys.platform == "win32":
-            killer = await asyncio.create_subprocess_exec(
-                os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe"),
-                "/PID",
-                str(process.pid),
-                "/T",
-                "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            code = await killer.wait()
-            if code and process.returncode is None:
-                raise OSError("Could not stop the Mole process tree")
-        else:
-            import signal
-
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(asyncio.shield(process.wait()), 2)
-            except asyncio.TimeoutError:
-                os.killpg(process.pid, signal.SIGKILL)
-        await process.wait()
 
     async def stop_clean(self, ctx: Context, action_context: ActionContext) -> None:
         self.stop_requested = True
@@ -522,16 +216,15 @@ class MolePlugin(Plugin, MoleRuntime):
     async def on_unload(self, ctx: Context) -> None:
         self.unloading = True
         self.stop_requested = True
+        if self.scene_task:
+            self.scene_task.cancel()
+            try:
+                await self.scene_task
+            except asyncio.CancelledError:
+                pass
         await self.terminate()
         if self.task:
             await self.task
-        for job in self.jobs.values():
-            await job.stop()
-            if job.task:
-                await job.task
-        await self.uninstall_backend.close()
-        if self.apps_task:
-            await self.apps_task
 
 
 plugin = MolePlugin()
