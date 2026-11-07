@@ -45,7 +45,7 @@ class TestCleanup(unittest.IsolatedAsyncioTestCase):
         async def worker(ctx):
             await gate.wait()
 
-        with patch.object(plugin, "run_clean", side_effect=worker) as run:
+        with patch.object(plugin, "_find_mo_executable", return_value="mo"), patch.object(plugin, "run_clean", side_effect=worker) as run:
             await row.actions[0].action(Context.new(), ActionContext())
             task = plugin.task
             await plugin.start_clean(Context.new(), ActionContext())
@@ -124,13 +124,54 @@ class TestCleanup(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_cli_reports_failure_and_recovery_action(self):
         plugin = MolePlugin()
-        with patch.object(plugin, "_find_mo_executable", return_value=None):
+        with (
+            patch.object(plugin, "_find_mo_executable", return_value=None),
+            patch.object(plugin, "_install_cli", side_effect=OSError("Could not download Mole.")),
+            patch.object(plugin, "clean_command") as command,
+        ):
             await plugin.run_clean(Context.new())
+        command.assert_not_called()
         self.assertEqual(plugin.session.state, "failed")
         self.assertIsNone(plugin.task)
-        self.assertIn("not found", plugin.session.message)
+        self.assertIn("Could not download Mole.", plugin.session.message)
         self.assertEqual(plugin.actions()[0].action, plugin.start_clean)
         self.assertEqual(plugin.actions()[1].action, plugin.copy_output)
+
+    async def test_missing_cli_installs_before_cleanup(self):
+        plugin = MolePlugin()
+        process = AsyncMock()
+        process.stdout.read.return_value = b""
+        process.wait.return_value = 0
+        with (
+            patch.object(plugin, "_find_mo_executable", return_value=None),
+            patch.object(plugin, "_install_cli") as install,
+            patch.object(plugin, "clean_command", return_value=["fixture"]),
+            patch("src.runner.asyncio.create_subprocess_exec", return_value=process),
+        ):
+            await plugin.run_clean(Context.new())
+        install.assert_called_once()
+        self.assertEqual(plugin.session.state, "completed")
+        self.assertIn("Mole CLI installed.", "\n".join(plugin.session.logs))
+
+    async def test_missing_cli_shows_download_instead_of_cleaning(self):
+        plugin = MolePlugin()
+        gate = asyncio.Event()
+
+        async def worker(ctx):
+            self.assertEqual(plugin.session.state, "downloading")
+            self.assertTrue(plugin.scene.frozen)
+            await gate.wait()
+
+        with (
+            patch.object(plugin, "_find_mo_executable", return_value=None),
+            patch.object(plugin, "run_clean", side_effect=worker),
+        ):
+            await plugin.start_clean(Context.new(), ActionContext())
+            view = summary(plugin.session, LABELS, plugin.session.started_at)
+            self.assertEqual(view["title"], "Downloading Mo")
+            self.assertEqual(view["message"], "Finding the latest release")
+            gate.set()
+            await plugin.task
 
     async def test_success_keeps_exit_animation_alive_after_process_finishes(self):
         plugin = MolePlugin()
@@ -316,6 +357,23 @@ class TestCleanup(unittest.IsolatedAsyncioTestCase):
 
 
 class TestOutput(unittest.TestCase):
+    def test_download_progress_replaces_the_cleaning_caption(self):
+        state = Session(state="downloading", download_phase="lookup", started_at=10)
+        value = summary(state, LABELS, 25)
+        self.assertEqual(value["title"], "Downloading Mo")
+        self.assertEqual(value["message"], "Finding the latest release")
+        self.assertEqual(value["elapsed"], "Elapsed 00:15")
+        state.download_phase = "archive"
+        state.download_label = "1.42.0"
+        state.download_received = 5 * 1024 * 1024
+        state.download_total = 20 * 1024 * 1024
+        self.assertEqual(summary(state, LABELS, 25)["message"], "1.42.0 · 5.0 MB / 20.0 MB · 25%")
+        state.download_total = 0
+        state.download_received = 1536 * 1024
+        self.assertEqual(summary(state, LABELS, 25)["message"], "1.42.0 · 1.5 MB")
+        state.download_phase = "install"
+        self.assertEqual(summary(state, LABELS, 25)["message"], "Installing Mo")
+
     def test_amount_parser_accepts_localized_numbers_and_keeps_unknown_distinct_from_zero(self):
         for amount in ("1,023KB", "59,8MB", "1.24GB", "0B"):
             with self.subTest(amount=amount):

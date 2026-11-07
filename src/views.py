@@ -188,7 +188,7 @@ def timer_node(session: Session, label: str, now: float):
                 "timer",
                 "clock",
                 elapsed=elapsed,
-                running=session.state == "running",
+                running=session.state in ("running", "downloading"),
                 animate=True,
                 playbackId=str(session.started_at),
                 style={"fontSize": 16, "fontWeight": "semibold", "color": "$textSecondary"},

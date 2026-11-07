@@ -13,6 +13,10 @@ from .runtime import MoleRuntime
 from .dashboard import Session
 
 
+class DownloadStopped(Exception):
+    """The user stopped cleanup while the CLI download was in progress."""
+
+
 class CleanupRunner(MoleRuntime):
     session: Session
     process: asyncio.subprocess.Process | None
@@ -25,7 +29,7 @@ class CleanupRunner(MoleRuntime):
     def clean_command(self) -> list[str]:
         executable = self._find_mo_executable()
         if not executable:
-            raise OSError("Mole CLI was not found. Install Mole and restart Wox.")
+            raise OSError("Mole CLI is still not available after installation.")
         args = [executable, "clean"]
         if sys.platform == "win32":
             # Prefer the script beside an actual launcher, for reliable UTF-8.
@@ -50,6 +54,57 @@ class CleanupRunner(MoleRuntime):
 
     async def run_clean(self, ctx: Context) -> None:
         try:
+            if not self._find_mo_executable():
+                self.session.state = "downloading"
+                self.session.download_phase = "lookup"
+                self.session.feed("Mole CLI was not found. Downloading the official release.")
+                await self.publish(ctx)
+                loop = asyncio.get_running_loop()
+                last_publish = 0.0
+                last_phase = ""
+                last_label = ""
+
+                def progress(phase: str, received: int, total: int, label: str = "") -> None:
+                    nonlocal last_publish, last_phase, last_label
+                    if self.stop_requested:
+                        raise DownloadStopped()
+                    now = time.monotonic()
+                    changed = phase != last_phase or label != last_label
+                    finished = total > 0 and received >= total
+                    if not changed and not finished and now - last_publish < 0.25:
+                        return
+                    last_publish = now
+                    last_phase = phase
+                    last_label = label
+
+                    def apply() -> None:
+                        if self.session.state != "downloading":
+                            return
+                        self.session.download_phase = phase
+                        self.session.download_received = received
+                        self.session.download_total = total
+                        if label:
+                            self.session.download_label = label
+                        asyncio.create_task(self.publish(ctx))
+
+                    loop.call_soon_threadsafe(apply)
+
+                try:
+                    await asyncio.to_thread(self._install_cli, progress)
+                except DownloadStopped:
+                    self.session.state = "stopped"
+                    return
+                if self.stop_requested:
+                    self.session.state = "stopped"
+                    return
+                self.session.state = "running"
+                self.session.download_phase = ""
+                self.session.download_received = 0
+                self.session.download_total = 0
+                self.session.download_label = ""
+                self.session.current_item = ""
+                self.session.feed("Mole CLI installed.")
+                await self.publish(ctx)
             env = os.environ.copy()
             env.update(NO_COLOR="1", MOLE_NO_COLOR="1", LC_ALL="C", LANG="C")
             env["MOLE_DRY_RUN"] = "0"

@@ -6,7 +6,7 @@
     "Name": "Mole",
     "Description": "Clean your Mac or Windows PC with a little Mole companion",
     "Author": "qianlifeng",
-    "Version": "0.0.3",
+    "Version": "1.0.0",
     "MinWoxVersion": "2.5.0",
     "Runtime": "python",
     "Website": "https://github.com/qianlifeng/Wox.Plugin.Mole",

@@ -1,11 +1,11 @@
 # Wox.Plugin.Mole
 
-A little Mole companion that cleans your Mac or Windows PC through the installed
-[Mole CLI](https://github.com/tw93/Mole).
+A little Mole companion that cleans your Mac or Windows PC with the
+[Mole CLI](https://github.com/tw93/Mole). If `mo` is not already installed,
+starting a cleanup downloads the official release.
 
-## Requirements
 
-- Wox **2.5.0+**, with native WoxView `sprite`, `timeline`, and `timer` support, and Python 3.10+.
-  This package requires the updated Wox core; restart Wox after rebuilding it.
-- An installed Mole CLI available on PATH, or in a standard Homebrew, Scoop or
-  Windows script-install location. Restart Wox after changing PATH.
+![](./screenshot.png)
+
+https://gist.github.com/user-attachments/assets/c37c7d95-e1e1-4f1c-811a-397376b2e850
+

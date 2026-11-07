@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 LABELS = {
     "ready": "Ready to clean",
     "running": "Cleaning",
+    "downloading": "Downloading Mo",
+    "download_lookup": "Finding the latest release",
+    "download_checksum": "Downloading checksums",
+    "download_verify": "Verifying the download",
+    "download_install": "Installing Mo",
     "completed": "Cleanup complete",
     "failed": "Cleanup failed",
     "stopped": "Cleanup stopped",
@@ -42,6 +47,10 @@ class Session:
     started_at: float = field(default_factory=time.monotonic)
     last_output_at: float = field(default_factory=time.monotonic)
     ended_at: float | None = None
+    download_phase: str = ""
+    download_received: int = 0
+    download_total: int = 0
+    download_label: str = ""
 
     def feed(self, line: str) -> None:
         line = ANSI.sub("", line)
@@ -79,11 +88,44 @@ class Session:
             self.feed(f"Mole exited with code {code}.")
 
 
+def format_bytes(amount: int) -> str:
+    if amount >= 1024 * 1024 or amount == 0:
+        return f"{amount / (1024 * 1024):.1f} MB"
+    if amount >= 1024:
+        return f"{amount / 1024:.0f} KB"
+    return f"{amount} B"
+
+
+def download_detail(session: Session, labels: dict[str, str]) -> str:
+    phase = session.download_phase
+    if phase == "archive":
+        received = format_bytes(session.download_received)
+        if session.download_total > 0:
+            percent = min(100, session.download_received * 100 // session.download_total)
+            detail = f"{received} / {format_bytes(session.download_total)} · {percent}%"
+        elif session.download_received:
+            detail = received
+        else:
+            detail = ""
+        if session.download_label and detail:
+            return f"{session.download_label} · {detail}"
+        return detail or session.download_label or labels["download_lookup"]
+    key = {
+        "lookup": "download_lookup",
+        "checksum": "download_checksum",
+        "verify": "download_verify",
+        "install": "download_install",
+    }.get(phase, "download_lookup")
+    return labels[key]
+
+
 def summary(session: Session, labels: dict[str, str], now: float) -> dict[str, str]:
     state = session.state
     message = labels["ready_hint"]
     amount = ""
-    if state == "running":
+    if state == "downloading":
+        message = download_detail(session, labels)
+    elif state == "running":
         message = session.current_item or session.stage or labels["working"]
     elif state == "completed":
         amount = session.freed or session.tracked

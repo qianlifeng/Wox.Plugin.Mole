@@ -20,4 +20,4 @@ build: lint test
 	uv run python scripts/package.py
 
 # Compatibility alias: this only creates a local archive; it does not upload.
-publish: build
+package: build

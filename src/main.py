@@ -198,9 +198,13 @@ class MolePlugin(Plugin, CleanupRunner):
             self.scene_task.cancel()
             self.scene_task = None
         self.stop_requested = False
-        self.session = Session(state="running")
+        downloading = self._find_mo_executable() is None
+        self.session = Session(state="downloading" if downloading else "running")
+        if downloading:
+            self.session.download_phase = "lookup"
         self.scene = HouseScene()
-        self.scene.start(time.monotonic())
+        if not downloading:
+            self.scene.start(time.monotonic())
         self.task = asyncio.create_task(self.run_clean(ctx))
         await self.publish(ctx)
 
